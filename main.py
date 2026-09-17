@@ -50,6 +50,7 @@ TEXTS = {
         "btn_about": "ℹ️ Biz haqimizda",
         "btn_contact": "📞 Aloqa",
         "btn_change_lang": "🌐 Tilni o'zgartirish",
+        "btn_home": "🏠 Bosh sahifa",
         "ask_name": "Buyurtma rasmiylashtirish uchun, iltimos, *ismingizni* kiriting yoki quyidagi tugmani bosing:",
         "ask_phone": "Rahmat, {name}! Endi *telefon raqamingizni* yuboring:",
         "btn_phone": "📱 Telefon raqamni yuborish",
@@ -61,7 +62,8 @@ TEXTS = {
         "about_text": "✨ *Tez Mebel* — har qanday turdagi mebellarni sifatli va hamyonbop narxlarda tayyorlab berish xizmati.\n\n🔹 Tajribali ustalar\n🔹 Zamonaviy dizayn va sifatli materiallar\n🔹 Tezkor o'lcham olish va yetkazib berish",
         "contact_text": "📞 *Biz bilan bog'lanish:*\n\nSavollaringiz va takliflaringiz bo'lsa, mutaxassisimizga bemalol murojaat qilishingiz mumkin.",
         "btn_tg_link": "💬 Telegram orqali bog'lanish",
-        "lang_changed": "Til muvaffaqiyatli o'zgartirildi! 🇺🇿"
+        "lang_changed": "Til muvaffaqiyatli o'zgartirildi! 🇺🇿",
+        "home_text": "Siz asosiy menyuga qaytdingiz. Kerakli bo'limni tanlang:"
     },
     "ru": {
         "welcome": "Здравствуйте! Добро пожаловать в официальный бот *'Tez Mebel'*! 🛠️ ✨\n\nЗадавайте вопросы или используйте меню ниже!",
@@ -69,6 +71,7 @@ TEXTS = {
         "btn_about": "ℹ️ О нас",
         "btn_contact": "📞 Контакты",
         "btn_change_lang": "🌐 Сменить язык",
+        "btn_home": "🏠 Главная страница",
         "ask_name": "Для оформления заказа, пожалуйста, введите ваше *имя* или нажмите кнопку ниже:",
         "ask_phone": "Спасибо, {name}! Теперь отправьте ваш *номер телефона*:",
         "btn_phone": "📱 Отправить номер телефона",
@@ -80,7 +83,8 @@ TEXTS = {
         "about_text": "✨ *Tez Mebel* — изготовление качественной мебели по доступным ценам.\n\n🔹 Опытные мастера\n🔹 Современный дизайн и качественные материалы\n🔹 Быстрый замер и доставка",
         "contact_text": "📞 *Связаться с нами:*\n\nПо всем вопросам и предложениям обращайтесь к нашему специалисту.",
         "btn_tg_link": "💬 Связаться через Telegram",
-        "lang_changed": "Язык успешно изменен! 🇷🇺"
+        "lang_changed": "Язык успешно изменен! 🇷🇺",
+        "home_text": "Вы вернулись в главное меню. Выберите нужный раздел:"
     }
 }
 
@@ -102,23 +106,32 @@ def get_main_keyboard(lang: str):
         resize_keyboard=True
     )
 
-def get_name_keyboard(telegram_name: str):
+def get_name_keyboard(telegram_name: str, lang: str):
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=telegram_name)]],
+        keyboard=[
+            [KeyboardButton(text=telegram_name)],
+            [KeyboardButton(text=TEXTS[lang]["btn_home"])]
+        ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
 
 def get_phone_keyboard(lang: str):
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=TEXTS[lang]["btn_phone"], request_contact=True)]],
+        keyboard=[
+            [KeyboardButton(text=TEXTS[lang]["btn_phone"], request_contact=True)],
+            [KeyboardButton(text=TEXTS[lang]["btn_home"])]
+        ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
 
 def get_location_keyboard(lang: str):
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=TEXTS[lang]["btn_location"], request_location=True)]],
+        keyboard=[
+            [KeyboardButton(text=TEXTS[lang]["btn_location"], request_location=True)],
+            [KeyboardButton(text=TEXTS[lang]["btn_home"])]
+        ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
@@ -129,7 +142,8 @@ def get_furniture_keyboard(lang: str):
         keyboard=[
             [KeyboardButton(text=f[0]), KeyboardButton(text=f[1])],
             [KeyboardButton(text=f[2]), KeyboardButton(text=f[3])],
-            [KeyboardButton(text=f[4])]
+            [KeyboardButton(text=f[4])],
+            [KeyboardButton(text=TEXTS[lang]["btn_home"])]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
@@ -173,6 +187,18 @@ async def change_lang_handler(message: Message, state: FSMContext):
     )
     await state.set_state(OrderState.waiting_for_lang)
 
+# Bosh sahifaga qaytish handler'i
+@dp.message(F.text.in_(["🏠 Bosh sahifa", "🏠 Главная страница"]))
+async def go_home(message: Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data.get("lang", "uz")
+    await state.clear()
+    await state.update_data(lang=lang)
+    await message.answer(
+        TEXTS[lang]["home_text"],
+        reply_markup=get_main_keyboard(lang)
+    )
+
 @dp.message(OrderState.waiting_for_lang, F.text.in_(["🇺🇿 O'zbekcha", "🇷🇺 Русский"]))
 async def set_language(message: Message, state: FSMContext):
     lang = "uz" if message.text == "🇺🇿 O'zbekcha" else "ru"
@@ -194,7 +220,7 @@ async def start_order(message: Message, state: FSMContext):
     await message.answer(
         TEXTS[lang]["ask_name"],
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_name_keyboard(telegram_name)
+        reply_markup=get_name_keyboard(telegram_name, lang)
     )
     await state.set_state(OrderState.waiting_for_name)
 
@@ -289,16 +315,28 @@ async def process_furniture(message: Message, state: FSMContext):
 async def about_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     lang = data.get("lang", "uz")
-    await message.answer(TEXTS[lang]["about_text"], parse_mode=ParseMode.MARKDOWN)
+    await message.answer(
+        TEXTS[lang]["about_text"], 
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_keyboard(lang)
+    )
 
 @dp.message(F.text.in_(["📞 Aloqa", "📞 Контакты"]))
 async def contact_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     lang = data.get("lang", "uz")
     contact_btn = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=TEXTS[lang]["btn_tg_link"], url=TELEGRAM_LINK)]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text=TEXTS[lang]["btn_tg_link"], url=TELEGRAM_LINK)],
+            [InlineKeyboardButton(text=TEXTS[lang]["btn_home"], callback_data="home")] # Agar kerak bo'lsa
+        ]
     )
-    await message.answer(TEXTS[lang]["contact_text"], parse_mode=ParseMode.MARKDOWN, reply_markup=contact_btn)
+    # Oddiy klaviaturada ham bosh sahifa tugmasi turadi
+    await message.answer(
+        TEXTS[lang]["contact_text"], 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=get_main_keyboard(lang)
+    )
 
 @dp.message(F.text)
 async def ai_chat_handler(message: Message):
@@ -315,6 +353,8 @@ async def ai_chat_handler(message: Message):
 
     try:
         ai_reply = await get_gemini_response(user_text)
+        data = await dp.storage.get_data(bot=bot, key=f"chat:{user_id}") or {} # lang ni olish uchun
+        # Sad-roq holatda asosiy menyuni chiqarib yuboramiz
         await message.answer(ai_reply)
 
         user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
@@ -334,7 +374,6 @@ async def ai_chat_handler(message: Message):
         logging.error(f"Gemini API xatosi: {e}")
         await message.answer("Xabaringiz qabul qilindi. Tez orada mutaxassisimiz javob beradi!")
 
-# Render port talabini bajarish uchun kichik veb-server
 async def handle_web(request):
     return web.Response(text="Bot is running!")
 
@@ -350,8 +389,6 @@ async def start_web_server():
 async def main():
     print("Tezkor Premium AI Boti ishga tushdi...")
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Render uchun veb-serverni yoqish
     await start_web_server()
     
     while True:
