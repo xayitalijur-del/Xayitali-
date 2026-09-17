@@ -315,7 +315,6 @@ async def ai_chat_handler(message: Message):
         ai_reply = await get_gemini_response(user_text)
         await message.answer(ai_reply)
 
-        # Mijozning xabari va AI bergan javobni adminga yuborish
         user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
         admin_report = (
             f"💬 *Mijoz va AI yozishmasi:*\n\n"
@@ -335,11 +334,14 @@ async def ai_chat_handler(message: Message):
 
 async def main():
     print("Tezkor Premium AI Boti ishga tushdi...")
+    # Eski so'rovlarni tozalab yuborish (Konflikt chiqarmasligi uchun)
+    await bot.delete_webhook(drop_pending_updates=True)
     while True:
         try:
-            await dp.start_polling(bot)
-        except (TelegramNetworkError, Exception):
-            await asyncio.sleep(2)
+            await dp.start_polling(bot, drop_pending_updates=True)
+        except (TelegramNetworkError, Exception) as e:
+            logging.error(f"Polling xatosi: {e}")
+            await asyncio.sleep(3)
 
 if __name__ == "__main__":
     asyncio.run(main())
