@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.types import (
     Message, 
+    CallbackQuery,
     ReplyKeyboardMarkup, 
     KeyboardButton, 
     InlineKeyboardMarkup,
@@ -28,7 +29,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Oddiy xotirada mijozlar va yozishmalarni saqlash uchun bazalar
 all_users = set()
 chat_history_logs = []
 
@@ -47,7 +47,7 @@ class OrderState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_location = State()
     waiting_for_furniture = State()
-    waiting_for_broadcast = State() # Admin xat yuborishi uchun
+    waiting_for_broadcast = State()
 
 TEXTS = {
     "uz": {
@@ -155,7 +155,6 @@ def get_furniture_keyboard(lang: str):
         one_time_keyboard=True
     )
 
-# Admin panel uchun inline tugmalar
 def get_admin_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -206,9 +205,8 @@ async def admin_panel_handler(message: Message, state: FSMContext):
         reply_markup=get_admin_keyboard()
     )
 
-# Admin tugmalari (Callback)
 @dp.callback_query(F.data.startswith("admin_"))
-async def admin_callbacks(callback: types.CallbackQuery if 'types' in globals() else callback_query_handler_placeholder, state: FSMContext):
+async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Siz admin emassiz!", show_alert=True)
         return
@@ -259,7 +257,7 @@ async def process_broadcast(message: Message, state: FSMContext):
         try:
             await bot.send_message(chat_id=user_id, text=f"📢 *E'lon:*\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN)
             success_count += 1
-            await asyncio.sleep(0.05) # Telegram limitiga tushmaslik uchun
+            await asyncio.sleep(0.05)
         except Exception:
             fail_count += 1
 
@@ -398,7 +396,7 @@ async def process_furniture(message: Message, state: FSMContext):
         if isinstance(location, dict):
             await bot.send_location(chat_id=ADMIN_ID, latitude=location["latitude"], longitude=location["longitude"])
         else:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_Mode=ParseMode.MARKDOWN)
+            await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logging.error(f"Adminga yuborishda xatolik: {e}")
 
@@ -444,7 +442,6 @@ async def ai_chat_handler(message: Message):
         ai_reply = await get_gemini_response(user_text)
         await message.answer(ai_reply)
 
-        # Loglarni .txt uchun yig'ib boramiz
         log_entry = f"Mijoz: {name} ({username}) [ID: {user_id}]\nSavol: {user_text}\nAI Javob: {ai_reply}\n" + "-"*40
         chat_history_logs.append(log_entry)
 
