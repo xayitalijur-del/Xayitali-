@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramNetworkError
 
-BOT_TOKEN = "8999006159:AAGrXALukv0f-gucJR4i6xEhv-RnoHmgSO4"
+BOT_TOKEN = "8708329718:AAETLtIatPvg6DvfrP5Zf9EtqMLu4Czf3RA"
 GEMINI_API_KEY = "AQ.Ab8RN6JSIoDZP1aqzV0-XNoDbuviWI5fuXVQryMoZ9S0P04tFw"
 ADMIN_ID = 1927054009
 TELEGRAM_LINK = "https://t.me/tez_meb"
@@ -334,7 +334,6 @@ async def ai_chat_handler(message: Message):
 
 async def main():
     print("Tezkor Premium AI Boti ishga tushdi...")
-    # Eski so'rovlarni tozalab yuborish (Konflikt chiqarmasligi uchun)
     await bot.delete_webhook(drop_pending_updates=True)
     while True:
         try:
