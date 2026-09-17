@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import aiohttp
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.types import (
@@ -332,9 +334,26 @@ async def ai_chat_handler(message: Message):
         logging.error(f"Gemini API xatosi: {e}")
         await message.answer("Xabaringiz qabul qilindi. Tez orada mutaxassisimiz javob beradi!")
 
+# Render port talabini bajarish uchun kichik veb-server
+async def handle_web(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
 async def main():
     print("Tezkor Premium AI Boti ishga tushdi...")
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Render uchun veb-serverni yoqish
+    await start_web_server()
+    
     while True:
         try:
             await dp.start_polling(bot, drop_pending_updates=True)
