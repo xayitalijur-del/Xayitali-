@@ -7,7 +7,6 @@ from aiogram.types import (
     Message, 
     ReplyKeyboardMarkup, 
     KeyboardButton, 
-    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton
 )
@@ -273,9 +272,8 @@ async def process_furniture(message: Message, state: FSMContext):
             await bot.send_location(chat_id=ADMIN_ID, latitude=location["latitude"], longitude=location["longitude"])
         else:
             await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_mode=ParseMode.MARKDOWN)
-        print("✅ Adminga muvaffaqiyatli yuborildi!")
     except Exception as e:
-        print(f"❌ ADMINGA YUBORISHDA XATOLIK: {e}")
+        logging.error(f"Adminga yuborishda xatolik: {e}")
 
     await state.set_state(None)
 
@@ -301,9 +299,30 @@ async def ai_chat_handler(message: Message):
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
+    user = message.from_user
+    name = user.full_name
+    username = f"@{user.username}" if user.username else "Kiritilmagan"
+    user_id = user.id
+    user_text = message.text
+
     try:
-        ai_reply = await get_gemini_response(message.text)
+        ai_reply = await get_gemini_response(user_text)
         await message.answer(ai_reply)
+
+        # Mijozning xabari va AI bergan javobni adminga yuborish
+        user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
+        admin_report = (
+            f"💬 *Mijoz va AI yozishmasi:*\n\n"
+            f"👤 *Mijoz:* {name} ({username})\n"
+            f"🆔 *ID:* `{user_id}`\n\n"
+            f"❓ *Mijozning savoli:* \n{user_text}\n\n"
+            f"🤖 *AI bergan javob:* \n{ai_reply}"
+        )
+        admin_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="💬 Mijozga yozish", url=user_link)]]
+        )
+        await bot.send_message(chat_id=ADMIN_ID, text=admin_report, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_keyboard)
+
     except Exception as e:
         logging.error(f"Gemini API xatosi: {e}")
         await message.answer("Xabaringiz qabul qilindi. Tez orada mutaxassisimiz javob beradi!")
