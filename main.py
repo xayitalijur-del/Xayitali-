@@ -10,7 +10,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup, 
     KeyboardButton, 
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    BufferedInputFile
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -27,6 +28,10 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Oddiy xotirada mijozlar va yozishmalarni saqlash uchun bazalar
+all_users = set()
+chat_history_logs = []
+
 SYSTEM_PROMPT = (
     "Siz 'Tez Mebel' premium mebel kompaniyasining professional va xushmuomala AI-konsultantisiz. "
     "Mijozlarga mebel turlari (oshxona, yotoqxona, mebel jihozlari), materiallar (MDF, LDSP, Akril) "
@@ -42,6 +47,7 @@ class OrderState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_location = State()
     waiting_for_furniture = State()
+    waiting_for_broadcast = State() # Admin xat yuborishi uchun
 
 TEXTS = {
     "uz": {
@@ -149,6 +155,16 @@ def get_furniture_keyboard(lang: str):
         one_time_keyboard=True
     )
 
+# Admin panel uchun inline tugmalar
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="📁 Yozishmalarni yuklab olish (.txt)", callback_data="admin_download")],
+            [InlineKeyboardButton(text="📢 Hammaga xabar yuborish", callback_data="admin_broadcast")]
+        ]
+    )
+
 async def get_gemini_response(user_text: str) -> str:
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     headers = {
@@ -171,6 +187,7 @@ async def get_gemini_response(user_text: str) -> str:
 
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
+    all_users.add(message.from_user.id)
     await state.clear()
     await message.answer(
         "Iltimos, tilni tanlang / Пожалуйста, выберите язык:",
@@ -178,18 +195,93 @@ async def start_handler(message: Message, state: FSMContext):
     )
     await state.set_state(OrderState.waiting_for_lang)
 
+@dp.message(Command("admin"))
+async def admin_panel_handler(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    await message.answer(
+        "🛠 *Admin boshqaruv paneli*ga xush kelibsiz!\nKerakli amalni tanlang:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_admin_keyboard()
+    )
+
+# Admin tugmalari (Callback)
+@dp.callback_query(F.data.startswith("admin_"))
+async def admin_callbacks(callback: types.CallbackQuery if 'types' in globals() else callback_query_handler_placeholder, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Siz admin emassiz!", show_alert=True)
+        return
+
+    action = callback.data
+    if action == "admin_stats":
+        total_users = len(all_users)
+        total_chats = len(chat_history_logs)
+        stats_text = (
+            f"📊 *Bot statistikasi:*\n\n"
+            f"👥 Jami foydalanuvchilar: {total_users} ta\n"
+            f"💬 Jami yozishmalar: {total_chats} ta"
+        )
+        await callback.message.answer(stats_text, parse_mode=ParseMode.MARKDOWN)
+        await callback.answer()
+
+    elif action == "admin_download":
+        if not chat_history_logs:
+            await callback.answer("Hozircha yozishmalar mavjud emas!", show_alert=True)
+            return
+        
+        file_content = "\n".join(chat_history_logs)
+        file_bytes = file_content.encode("utf-8")
+        document = BufferedInputFile(file_bytes, filename="mijozlar_yozishmalari.txt")
+        
+        await callback.message.answer_document(document=document, caption="📁 Barcha mijozlar yozishmalari tarixi.")
+        await callback.answer()
+
+    elif action == "admin_broadcast":
+        await callback.message.answer("📢 Barcha mijozlarga yubormoqchi bo'lgan xabaringizni kiriting:")
+        await state.set_state(OrderState.waiting_for_broadcast)
+        await callback.answer()
+
+@dp.message(OrderState.waiting_for_broadcast, F.text)
+async def process_broadcast(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    broadcast_text = message.text
+    await state.clear()
+    
+    success_count = 0
+    fail_count = 0
+    
+    status_msg = await message.answer("⏳ Xabarlar tarqatilmoqda...")
+
+    for user_id in all_users:
+        try:
+            await bot.send_message(chat_id=user_id, text=f"📢 *E'lon:*\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN)
+            success_count += 1
+            await asyncio.sleep(0.05) # Telegram limitiga tushmaslik uchun
+        except Exception:
+            fail_count += 1
+
+    await status_msg.edit_text(
+        f"✅ Xabar tarqatish yakunlandi!\n\n"
+        f"Muvaffaqiyatli yuborildi: {success_count} ta\n"
+        f"Xatolik (bloklaganlar): {fail_count} ta"
+    )
+
 @dp.message(Command("lang"))
 @dp.message(F.text.in_(["🌐 Tilni o'zgartirish", "🌐 Сменить язык"]))
 async def change_lang_handler(message: Message, state: FSMContext):
+    all_users.add(message.from_user.id)
     await message.answer(
         "Iltimos, yangi tilni tanlang / Пожалуйста, выберите новый язык:",
         reply_markup=get_lang_keyboard()
     )
     await state.set_state(OrderState.waiting_for_lang)
 
-# Bosh sahifaga qaytish handler'i
 @dp.message(F.text.in_(["🏠 Bosh sahifa", "🏠 Главная страница"]))
 async def go_home(message: Message, state: FSMContext):
+    all_users.add(message.from_user.id)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     await state.clear()
@@ -213,6 +305,7 @@ async def set_language(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["📝 Buyurtma berish / O'lcham olish", "📝 Заказать / Вызов замерщика"]))
 async def start_order(message: Message, state: FSMContext):
+    all_users.add(message.from_user.id)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     telegram_name = message.from_user.first_name or "Mijoz"
@@ -305,7 +398,7 @@ async def process_furniture(message: Message, state: FSMContext):
         if isinstance(location, dict):
             await bot.send_location(chat_id=ADMIN_ID, latitude=location["latitude"], longitude=location["longitude"])
         else:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_mode=ParseMode.MARKDOWN)
+            await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_Mode=ParseMode.MARKDOWN)
     except Exception as e:
         logging.error(f"Adminga yuborishda xatolik: {e}")
 
@@ -313,6 +406,7 @@ async def process_furniture(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["ℹ️ Biz haqimizda", "ℹ️ О нас"]))
 async def about_handler(message: Message, state: FSMContext):
+    all_users.add(message.from_user.id)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     await message.answer(
@@ -323,15 +417,9 @@ async def about_handler(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["📞 Aloqa", "📞 Контакты"]))
 async def contact_handler(message: Message, state: FSMContext):
+    all_users.add(message.from_user.id)
     data = await state.get_data()
     lang = data.get("lang", "uz")
-    contact_btn = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=TEXTS[lang]["btn_tg_link"], url=TELEGRAM_LINK)],
-            [InlineKeyboardButton(text=TEXTS[lang]["btn_home"], callback_data="home")] # Agar kerak bo'lsa
-        ]
-    )
-    # Oddiy klaviaturada ham bosh sahifa tugmasi turadi
     await message.answer(
         TEXTS[lang]["contact_text"], 
         parse_mode=ParseMode.MARKDOWN, 
@@ -343,6 +431,7 @@ async def ai_chat_handler(message: Message):
     if message.from_user.is_bot:
         return
 
+    all_users.add(message.from_user.id)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     user = message.from_user
@@ -353,9 +442,11 @@ async def ai_chat_handler(message: Message):
 
     try:
         ai_reply = await get_gemini_response(user_text)
-        data = await dp.storage.get_data(bot=bot, key=f"chat:{user_id}") or {} # lang ni olish uchun
-        # Sad-roq holatda asosiy menyuni chiqarib yuboramiz
         await message.answer(ai_reply)
+
+        # Loglarni .txt uchun yig'ib boramiz
+        log_entry = f"Mijoz: {name} ({username}) [ID: {user_id}]\nSavol: {user_text}\nAI Javob: {ai_reply}\n" + "-"*40
+        chat_history_logs.append(log_entry)
 
         user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
         admin_report = (
@@ -387,7 +478,7 @@ async def start_web_server():
     await site.start()
 
 async def main():
-    print("Tezkor Premium AI Boti ishga tushdi...")
+    print("Tezkor Premium AI Boti va Admin Panel ishga tushdi...")
     await bot.delete_webhook(drop_pending_updates=True)
     await start_web_server()
     
