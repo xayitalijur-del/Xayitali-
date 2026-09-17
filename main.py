@@ -17,7 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramNetworkError
 
 BOT_TOKEN = "8999006159:AAGrXALukv0f-gucJR4i6xEhv-RnoHmgSO4"
-GEMINI_API_KEY = "AQ.Ab8RN6KLEEDqjXUKTZHEz6uDkoQMZFGLHPQWa0qxM91WMvfalg"
+GEMINI_API_KEY = "AQ.Ab8RN6JSIoDZP1aqzV0-XNoDbuviWI5fuXVQryMoZ9S0P04tFw"
 ADMIN_ID = 1927054009
 TELEGRAM_LINK = "https://t.me/tez_meb"
 
@@ -134,18 +134,24 @@ def get_furniture_keyboard(lang: str):
     )
 
 async def get_gemini_response(user_text: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
     payload = {
         "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\nMijoz xabari: {user_text}"}]}]
     }
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers, timeout=10) as response:
+        async with session.post(url, json=payload, headers=headers, timeout=15) as response:
             if response.status == 200:
                 data = await response.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
-            raise Exception(f"API Error Code: {response.status}")
+            else:
+                error_text = await response.text()
+                logging.error(f"Gemini API xatosi ({response.status}): {error_text}")
+                raise Exception(f"API Error Code: {response.status}")
 
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
