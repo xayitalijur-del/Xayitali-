@@ -333,7 +333,6 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
     elif action == "admin_download_orders":
         orders = db_get_orders()
         if not orders:
-            await orders_empty = True # type: ignore
             await callback.answer("Buyurtmalar mavjud emas!", show_alert=True)
             return
         
@@ -499,4 +498,89 @@ async def process_furniture(message: Message, state: FSMContext):
     )
 
     try:
-        await bot
+        await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode=ParseMode.MARKDOWN, reply_markup=user_keyboard)
+        if isinstance(location, dict):
+            await bot.send_location(chat_id=ADMIN_ID, latitude=location["lat"], longitude=location["lon"])
+        else:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logging.error(f"Adminga buyurtma yuborishda xato: {e}")
+
+    await state.set_state(None)
+
+@dp.message(F.text.in_(["ℹ️ Biz haqimizda", "ℹ️ О нас"]))
+async def about_handler(message: Message, state: FSMContext):
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    data = await state.get_data()
+    lang = data.get("lang", "uz")
+    await message.answer(TEXTS[lang]["about_text"], parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard(lang))
+
+@dp.message(F.text.in_(["📞 Aloqa", "📞 Контакты"]))
+async def contact_handler(message: Message, state: FSMContext):
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    data = await state.get_data()
+    lang = data.get("lang", "uz")
+    await message.answer(TEXTS[lang]["contact_text"], parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard(lang))
+
+@dp.message(F.text)
+async def ai_chat_handler(message: Message):
+    if message.from_user.is_bot:
+        return
+
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    
+    user = message.from_user
+    name = user.full_name
+    username = f"@{user.username}" if user.username else "Kiritilmagan"
+    user_id = user.id
+    user_text = message.text
+
+    ai_reply = await get_gemini_response(user_text)
+    await message.answer(ai_reply)
+
+    # Bazaga yozishmani saqlash
+    db_log_chat(user_id, name, user_text, ai_reply)
+
+    user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
+    admin_report = (
+        f"💬 *Mijoz va AI yozishmasi:*\n\n"
+        f"👤 *Mijoz:* {name} ({username})\n"
+        f"🆔 *ID:* `{user_id}`\n\n"
+        f"❓ *Savol:* \n{user_text}\n\n"
+        f"🤖 *AI Javobi:* \n{ai_reply}"
+    )
+    admin_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="💬 Mijozga yozish", url=user_link)]]
+    )
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=admin_report, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_keyboard)
+    except Exception as e:
+        logging.error(f"Adminga chat yuborishda xato: {e}")
+
+async def handle_web(request):
+    return web.Response(text="Bot is running smoothly!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+async def main():
+    print("Tez Mebel Premium AI Boti (SQLite bazasi bilan) ishga tushdi...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await start_web_server()
+    
+    while True:
+        try:
+            await dp.start_polling(bot, drop_pending_updates=True)
+        except (TelegramNetworkError, Exception) as e:
+            logging.error(f"Polling xatosi: {e}")
+            await asyncio.sleep(3)
+
+if __name__ == "__main__":
+    asyncio.run(main())
