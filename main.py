@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sqlite3
 import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -23,22 +24,116 @@ from aiogram.exceptions import TelegramNetworkError
 BOT_TOKEN = "8708329718:AAETLtIatPvg6DvfrP5Zf9EtqMLu4Czf3RA"
 GEMINI_API_KEY = "AQ.Ab8RN6JSIoDZP1aqzV0-XNoDbuviWI5fuXVQryMoZ9S0P04tFw"
 ADMIN_ID = 1927054009
-TELEGRAM_LINK = "https://t.me/tez_meb"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-all_users = set()
-chat_history_logs = []
+# --- BAZA BILAN ISHLASH (SQLite) ---
+def init_db():
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            username TEXT,
+            joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            user_name TEXT,
+            question TEXT,
+            ai_answer TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            name TEXT,
+            phone TEXT,
+            location TEXT,
+            furniture TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
 
+init_db()
+
+def db_add_user(user_id, full_name, username):
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name, username) VALUES (?, ?, ?)", 
+                   (user_id, full_name, username))
+    conn.commit()
+    conn.close()
+
+def db_log_chat(user_id, user_name, question, ai_answer):
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO chats (user_id, user_name, question, ai_answer) VALUES (?, ?, ?, ?)",
+                   (user_id, user_name, question, ai_answer))
+    conn.commit()
+    conn.close()
+
+def db_save_order(user_id, name, phone, location, furniture):
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO orders (user_id, name, phone, location, furniture) VALUES (?, ?, ?, ?, ?)",
+                   (user_id, name, phone, str(location), furniture))
+    conn.commit()
+    conn.close()
+
+def db_get_stats():
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM chats")
+    chats_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM orders")
+    orders_count = cursor.fetchone()[0]
+    conn.close()
+    return users_count, chats_count, orders_count
+
+def db_get_all_users():
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    users = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return users
+
+def db_get_chat_logs():
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_name, question, ai_answer, timestamp FROM chats ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def db_get_orders():
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, phone, location, furniture, timestamp FROM orders ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+# --- AI TIZIMI ---
 SYSTEM_PROMPT = (
-    "Siz 'Tez Mebel' premium mebel kompaniyasining professional va xushmuomala AI-konsultantisiz. "
-    "Mijozlarga mebel turlari (oshxona, yotoqxona, mebel jihozlari), materiallar (MDF, LDSP, Akril) "
-    "va sifat bo'yicha aniq, qisqa va tushunarli maslahatlar bering. "
-    "Mijoz qaysi tilda (o'zbek yoki rus tilida) yozsa, xuddi shu tilda javob bering. "
-    "Agar mijoz buyurtma bermoqchi bo'lsa yoki aniq hisob-kitob so'rasa, "
-    "unga '📝 Buyurtma berish / Заказать' tugmasini bosishni taklif qiling."
+    "Siz 'Tez Mebel' premium mebel kompaniyasining professional, ziyrak va xushmuomala AI-konsultantisiz. "
+    "Mijozlarga oshxona, yotoqxona, shkaf, do'kon va apteka jihozlari, materiallar (MDF, LDSP, Akril) "
+    "bo'yicha eng aniq va sifatli maslahatlar bering. "
+    "Mijoz qaysi tilda (o'zbek yoki rus tilida) yozsa, xuddi shu tilda mukammal javob bering. "
+    "Agar mijoz narx yoki buyurtma haqida so'rasa, unga zudlik bilan '📝 Buyurtma berish / Заказать' tugmasini bosishni tavsiya qiling."
 )
 
 class OrderState(StatesGroup):
@@ -51,28 +146,27 @@ class OrderState(StatesGroup):
 
 TEXTS = {
     "uz": {
-        "welcome": "Assalomu alaykum! *'Tez Mebel'* rasmiy botiga xush kelibsiz! 🛠️ ✨\n\nSavolingiz bo'lsa bemalol yozing yoki menyudan foydalaning!",
+        "welcome": "Assalomu alaykum! *'Tez Mebel'* rasmiy premium botiga xush kelibsiz! 🛠️ ✨\n\nSavollaringizni yuboring yoki quyidagi menyudan foydalaning:",
         "btn_order": "📝 Buyurtma berish / O'lcham olish",
         "btn_about": "ℹ️ Biz haqimizda",
         "btn_contact": "📞 Aloqa",
         "btn_change_lang": "🌐 Tilni o'zgartirish",
         "btn_home": "🏠 Bosh sahifa",
-        "ask_name": "Buyurtma rasmiylashtirish uchun, iltimos, *ismingizni* kiriting yoki quyidagi tugmani bosing:",
+        "ask_name": "Buyurtmani rasmiylashtirish uchun, iltimos, *ismingizni* kiriting yoki pastdagi tugmani bosing:",
         "ask_phone": "Rahmat, {name}! Endi *telefon raqamingizni* yuboring:",
         "btn_phone": "📱 Telefon raqamni yuborish",
-        "ask_location": "Ajoyib! Endi yetkazib berish yoki o'lcham olish uchun *lokatsiyangizni* yuboring:",
+        "ask_location": "Ajoyib! Endi usta kelishi uchun *lokatsiyangizni* yuboring:",
         "btn_location": "📍 Lokatsiyani yuborish",
-        "ask_furniture": "Qanday mebel kerakligini tugmalardan tanlang yoki o'z variantingizni yozib yuboring:",
+        "ask_furniture": "Qanday turdagi mebel buyurtma qilmoqchisiz? Tanlang yoki yozib yuboring:",
         "furnitures": ["Oshxona", "Shkaf", "Doʻkon", "Apteka", "Aksessuar"],
-        "order_done": "Rahmat! Buyurtmangiz qabul qilindi. Tez orada usta siz bilan bog'lanadi. 🛠️",
-        "about_text": "✨ *Tez Mebel* — har qanday turdagi mebellarni sifatli va hamyonbop narxlarda tayyorlab berish xizmati.\n\n🔹 Tajribali ustalar\n🔹 Zamonaviy dizayn va sifatli materiallar\n🔹 Tezkor o'lcham olish va yetkazib berish",
-        "contact_text": "📞 *Biz bilan bog'lanish:*\n\nSavollaringiz va takliflaringiz bo'lsa, mutaxassisimizga bemalol murojaat qilishingiz mumkin.",
-        "btn_tg_link": "💬 Telegram orqali bog'lanish",
+        "order_done": "Rahmat! Buyurtmangiz qabul qilindi. Tez orada mutaxassisimiz siz bilan bog'lanadi. 🛠️",
+        "about_text": "✨ *Tez Mebel* — har qanday turdagi dizayn asosida sifatli va ishonchli mebellarni tayyorlab berish xizmati.\n\n🔹 Premium materiallar (MDF, Akril, LDSP)\n🔹 Tajribali ustalar va tezkor o'lcham olish\n🔹 Kafolatli sifat va hamyonbop narxlar",
+        "contact_text": "📞 *Biz bilan bog'lanish:*\n\nSavollar bo'yicha mutaxassisimizga to'g'ridan-to'g'ri murojaat qilishingiz mumkin.",
         "lang_changed": "Til muvaffaqiyatli o'zgartirildi! 🇺🇿",
         "home_text": "Siz asosiy menyuga qaytdingiz. Kerakli bo'limni tanlang:"
     },
     "ru": {
-        "welcome": "Здравствуйте! Добро пожаловать в официальный бот *'Tez Mebel'*! 🛠️ ✨\n\nЗадавайте вопросы или используйте меню ниже!",
+        "welcome": "Здравствуйте! Добро пожаловать в официальный премиум-бот *'Tez Mebel'*! 🛠️ ✨\n\nЗадавайте вопросы или используйте меню ниже:",
         "btn_order": "📝 Заказать / Вызов замерщика",
         "btn_about": "ℹ️ О нас",
         "btn_contact": "📞 Контакты",
@@ -81,14 +175,13 @@ TEXTS = {
         "ask_name": "Для оформления заказа, пожалуйста, введите ваше *имя* или нажмите кнопку ниже:",
         "ask_phone": "Спасибо, {name}! Теперь отправьте ваш *номер телефона*:",
         "btn_phone": "📱 Отправить номер телефона",
-        "ask_location": "Отлично! Теперь отправьте вашу *локацию* для доставки или замера:",
+        "ask_location": "Отлично! Теперь отправьте вашу *локацию* для вызова мастера:",
         "btn_location": "📍 Отправить локацию",
-        "ask_furniture": "Выберите нужную мебель из кнопок или напишите свой вариант:",
+        "ask_furniture": "Какую мебель вы хотите заказать? Выберите или напишите свой вариант:",
         "furnitures": ["Кухня", "Шкаф", "Магазин", "Аптека", "Аксессуары"],
-        "order_done": "Спасибо! Ваш заказ принят. Мастер свяжется с вами в ближайшее время. 🛠️",
-        "about_text": "✨ *Tez Mebel* — изготовление качественной мебели по доступным ценам.\n\n🔹 Опытные мастера\n🔹 Современный дизайн и качественные материалы\n🔹 Быстрый замер и доставка",
-        "contact_text": "📞 *Связаться с нами:*\n\nПо всем вопросам и предложениям обращайтесь к нашему специалисту.",
-        "btn_tg_link": "💬 Связаться через Telegram",
+        "order_done": "Спасибо! Ваш заказ принят. Наш специалист свяжется с вами в ближайшее время. 🛠️",
+        "about_text": "✨ *Tez Mebel* — изготовление качественной и надежной мебели на заказ.\n\n🔹 Премиальные материалы (МДФ, Акрил, ЛДСП)\n🔹 Опытные мастера и быстрый замер\n🔹 Гарантия качества и доступные цены",
+        "contact_text": "📞 *Контакты:*\n\nПо всем вопросам вы можете обратиться к нашему специалисту.",
         "lang_changed": "Язык успешно изменен! 🇷🇺",
         "home_text": "Вы вернулись в главное меню. Выберите нужный раздел:"
     }
@@ -158,8 +251,9 @@ def get_furniture_keyboard(lang: str):
 def get_admin_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
-            [InlineKeyboardButton(text="📁 Yozishmalarni yuklab olish (.txt)", callback_data="admin_download")],
+            [InlineKeyboardButton(text="📊 Batafsil Statistika", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="📁 Yozishmalarni yuklab olish (.txt)", callback_data="admin_download_chats")],
+            [InlineKeyboardButton(text="📋 Buyurtmalar hisoboti (.txt)", callback_data="admin_download_orders")],
             [InlineKeyboardButton(text="📢 Hammaga xabar yuborish", callback_data="admin_broadcast")]
         ]
     )
@@ -173,20 +267,18 @@ async def get_gemini_response(user_text: str) -> str:
     payload = {
         "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\nMijoz xabari: {user_text}"}]}]
     }
-    
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers, timeout=15) as response:
             if response.status == 200:
                 data = await response.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
             else:
-                error_text = await response.text()
-                logging.error(f"Gemini API xatosi ({response.status}): {error_text}")
-                raise Exception(f"API Error Code: {response.status}")
+                logging.error(f"Gemini API xatosi: {response.status}")
+                return "Kechirasiz, hozirda so'rovingizni qayta ishlashda vaqtincha xatolik yuz berdi. Iltimos, birozdan so'ng qayta yozing."
 
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
-    all_users.add(message.from_user.id)
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     await state.clear()
     await message.answer(
         "Iltimos, tilni tanlang / Пожалуйста, выберите язык:",
@@ -200,7 +292,7 @@ async def admin_panel_handler(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer(
-        "🛠 *Admin boshqaruv paneli*ga xush kelibsiz!\nKerakli amalni tanlang:",
+        "🛠 *Admin Boshqaruv Markazi*\n\nKerakli bo'limni tanlang:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_admin_keyboard()
     )
@@ -213,30 +305,49 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
 
     action = callback.data
     if action == "admin_stats":
-        total_users = len(all_users)
-        total_chats = len(chat_history_logs)
+        u_count, c_count, o_count = db_get_stats()
         stats_text = (
-            f"📊 *Bot statistikasi:*\n\n"
-            f"👥 Jami foydalanuvchilar: {total_users} ta\n"
-            f"💬 Jami yozishmalar: {total_chats} ta"
+            f"📊 *Botning umumiy statistikasi:*\n\n"
+            f"👥 Jami foydalanuvchilar: `{u_count}` ta\n"
+            f"💬 Jami AI yozishmalar: `{c_count}` ta\n"
+            f"📥 Jami buyurtmalar: `{o_count}` ta"
         )
         await callback.message.answer(stats_text, parse_mode=ParseMode.MARKDOWN)
         await callback.answer()
 
-    elif action == "admin_download":
-        if not chat_history_logs:
-            await callback.answer("Hozircha yozishmalar mavjud emas!", show_alert=True)
+    elif action == "admin_download_chats":
+        logs = db_get_chat_logs()
+        if not logs:
+            await callback.answer("Yozishmalar mavjud emas!", show_alert=True)
             return
         
-        file_content = "\n".join(chat_history_logs)
-        file_bytes = file_content.encode("utf-8")
-        document = BufferedInputFile(file_bytes, filename="mijozlar_yozishmalari.txt")
+        content = "=== MIJOZ VA AI YOZISHMALARI TARIXI ===\n\n"
+        for name, q, a, time in logs:
+            content += f"Vaqt: {time}\nMijoz: {name}\nSavol: {q}\nAI Javob: {a}\n" + "-"*40 + "\n"
         
-        await callback.message.answer_document(document=document, caption="📁 Barcha mijozlar yozishmalari tarixi.")
+        file_bytes = content.encode("utf-8")
+        doc = BufferedInputFile(file_bytes, filename="mijozlar_yozishmalari.txt")
+        await callback.message.answer_document(document=doc, caption="📁 Barcha AI suhbatlari tarixi.")
+        await callback.answer()
+
+    elif action == "admin_download_orders":
+        orders = db_get_orders()
+        if not orders:
+            await orders_empty = True # type: ignore
+            await callback.answer("Buyurtmalar mavjud emas!", show_alert=True)
+            return
+        
+        content = "=== TAHVIL QILINGAN BUYURTMALAR HISTORIYASI ===\n\n"
+        for name, phone, loc, furn, time in orders:
+            content += f"Vaqt: {time}\nIsm: {name}\nTel: {phone}\nManzil: {loc}\nMebel: {furn}\n" + "="*30 + "\n"
+            
+        file_bytes = content.encode("utf-8")
+        doc = BufferedInputFile(file_bytes, filename="buyurtmalar_tarixi.txt")
+        await callback.message.answer_document(document=doc, caption="📋 Barcha buyurtmalar ro'yxati.")
         await callback.answer()
 
     elif action == "admin_broadcast":
-        await callback.message.answer("📢 Barcha mijozlarga yubormoqchi bo'lgan xabaringizni kiriting:")
+        await callback.message.answer("📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni kiriting:")
         await state.set_state(OrderState.waiting_for_broadcast)
         await callback.answer()
 
@@ -247,30 +358,29 @@ async def process_broadcast(message: Message, state: FSMContext):
     
     broadcast_text = message.text
     await state.clear()
+    users = db_get_all_users()
     
-    success_count = 0
-    fail_count = 0
-    
+    success = 0
+    fail = 0
     status_msg = await message.answer("⏳ Xabarlar tarqatilmoqda...")
 
-    for user_id in all_users:
+    for uid in users:
         try:
-            await bot.send_message(chat_id=user_id, text=f"📢 *E'lon:*\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN)
-            success_count += 1
-            await asyncio.sleep(0.05)
+            await bot.send_message(chat_id=uid, text=f"📢 *Tez Mebel E'loni:*\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN)
+            success += 1
+            await asyncio.sleep(0.03)
         except Exception:
-            fail_count += 1
+            fail += 1
 
     await status_msg.edit_text(
-        f"✅ Xabar tarqatish yakunlandi!\n\n"
-        f"Muvaffaqiyatli yuborildi: {success_count} ta\n"
-        f"Xatolik (bloklaganlar): {fail_count} ta"
+        f"✅ Tarqatish yakunlandi!\n\n"
+        f"Muvaffaqiyatli: {success} ta\n"
+        f"Xatolik (bloklaganlar): {fail} ta"
     )
 
-@dp.message(Command("lang"))
 @dp.message(F.text.in_(["🌐 Tilni o'zgartirish", "🌐 Сменить язык"]))
 async def change_lang_handler(message: Message, state: FSMContext):
-    all_users.add(message.from_user.id)
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     await message.answer(
         "Iltimos, yangi tilni tanlang / Пожалуйста, выберите новый язык:",
         reply_markup=get_lang_keyboard()
@@ -279,7 +389,7 @@ async def change_lang_handler(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["🏠 Bosh sahifa", "🏠 Главная страница"]))
 async def go_home(message: Message, state: FSMContext):
-    all_users.add(message.from_user.id)
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     await state.clear()
@@ -293,7 +403,6 @@ async def go_home(message: Message, state: FSMContext):
 async def set_language(message: Message, state: FSMContext):
     lang = "uz" if message.text == "🇺🇿 O'zbekcha" else "ru"
     await state.update_data(lang=lang)
-    
     await message.answer(
         TEXTS[lang]["lang_changed"] + "\n\n" + TEXTS[lang]["welcome"],
         parse_mode=ParseMode.MARKDOWN,
@@ -303,7 +412,7 @@ async def set_language(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["📝 Buyurtma berish / O'lcham olish", "📝 Заказать / Вызов замерщика"]))
 async def start_order(message: Message, state: FSMContext):
-    all_users.add(message.from_user.id)
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     telegram_name = message.from_user.first_name or "Mijoz"
@@ -344,7 +453,7 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.message(OrderState.waiting_for_location, F.location | F.text)
 async def process_location(message: Message, state: FSMContext):
-    loc_data = {"latitude": message.location.latitude, "longitude": message.location.longitude} if message.location else message.text
+    loc_data = {"lat": message.location.latitude, "lon": message.location.longitude} if message.location else message.text
     await state.update_data(location=loc_data)
     data = await state.get_data()
     lang = data.get("lang", "uz")
@@ -368,13 +477,16 @@ async def process_furniture(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username
 
+    # Bazaga buyurtmani saqlash
+    db_save_order(user_id, name, phone, location, furniture_detail)
+
     await message.answer(
         TEXTS[lang]["order_done"],
         reply_markup=get_main_keyboard(lang)
     )
 
     admin_text = (
-        "📥 *Yangi buyurtma kelib tushdi!*\n\n"
+        "📥 *Yangi buyurtma qabul qilindi!*\n\n"
         f"🌐 *Til:* {lang.upper()}\n"
         f"👤 *Ismi:* {name}\n"
         f"📞 *Telefon:* `{phone}`\n"
@@ -387,104 +499,4 @@ async def process_furniture(message: Message, state: FSMContext):
     )
 
     try:
-        await bot.send_message(
-            chat_id=ADMIN_ID, 
-            text=admin_text, 
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=user_keyboard
-        )
-        if isinstance(location, dict):
-            await bot.send_location(chat_id=ADMIN_ID, latitude=location["latitude"], longitude=location["longitude"])
-        else:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"📍 *Manzil:* {location}", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logging.error(f"Adminga yuborishda xatolik: {e}")
-
-    await state.set_state(None)
-
-@dp.message(F.text.in_(["ℹ️ Biz haqimizda", "ℹ️ О нас"]))
-async def about_handler(message: Message, state: FSMContext):
-    all_users.add(message.from_user.id)
-    data = await state.get_data()
-    lang = data.get("lang", "uz")
-    await message.answer(
-        TEXTS[lang]["about_text"], 
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_main_keyboard(lang)
-    )
-
-@dp.message(F.text.in_(["📞 Aloqa", "📞 Контакты"]))
-async def contact_handler(message: Message, state: FSMContext):
-    all_users.add(message.from_user.id)
-    data = await state.get_data()
-    lang = data.get("lang", "uz")
-    await message.answer(
-        TEXTS[lang]["contact_text"], 
-        parse_mode=ParseMode.MARKDOWN, 
-        reply_markup=get_main_keyboard(lang)
-    )
-
-@dp.message(F.text)
-async def ai_chat_handler(message: Message):
-    if message.from_user.is_bot:
-        return
-
-    all_users.add(message.from_user.id)
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    user = message.from_user
-    name = user.full_name
-    username = f"@{user.username}" if user.username else "Kiritilmagan"
-    user_id = user.id
-    user_text = message.text
-
-    try:
-        ai_reply = await get_gemini_response(user_text)
-        await message.answer(ai_reply)
-
-        log_entry = f"Mijoz: {name} ({username}) [ID: {user_id}]\nSavol: {user_text}\nAI Javob: {ai_reply}\n" + "-"*40
-        chat_history_logs.append(log_entry)
-
-        user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
-        admin_report = (
-            f"💬 *Mijoz va AI yozishmasi:*\n\n"
-            f"👤 *Mijoz:* {name} ({username})\n"
-            f"🆔 *ID:* `{user_id}`\n\n"
-            f"❓ *Mijozning savoli:* \n{user_text}\n\n"
-            f"🤖 *AI bergan javob:* \n{ai_reply}"
-        )
-        admin_keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="💬 Mijozga yozish", url=user_link)]]
-        )
-        await bot.send_message(chat_id=ADMIN_ID, text=admin_report, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_keyboard)
-
-    except Exception as e:
-        logging.error(f"Gemini API xatosi: {e}")
-        await message.answer("Xabaringiz qabul qilindi. Tez orada mutaxassisimiz javob beradi!")
-
-async def handle_web(request):
-    return web.Response(text="Bot is running!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-async def main():
-    print("Tezkor Premium AI Boti va Admin Panel ishga tushdi...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await start_web_server()
-    
-    while True:
-        try:
-            await dp.start_polling(bot, drop_pending_updates=True)
-        except (TelegramNetworkError, Exception) as e:
-            logging.error(f"Polling xatosi: {e}")
-            await asyncio.sleep(3)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        await bot
