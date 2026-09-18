@@ -59,10 +59,10 @@ def init_db():
             phone TEXT,
             location TEXT,
             furniture TEXT,
+            photo_id TEXT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Katalog jadvali (photo_id ustuni qo'shildi)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS catalog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,11 +93,11 @@ def db_log_chat(user_id, user_name, question, ai_answer):
     conn.commit()
     conn.close()
 
-def db_save_order(user_id, name, phone, location, furniture):
+def db_save_order(user_id, name, phone, location, furniture, photo_id):
     conn = sqlite3.connect("tez_mebel.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO orders (user_id, name, phone, location, furniture) VALUES (?, ?, ?, ?, ?)",
-                   (user_id, name, phone, str(location), furniture))
+    cursor.execute("INSERT INTO orders (user_id, name, phone, location, furniture, photo_id) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user_id, name, phone, str(location), furniture, photo_id))
     conn.commit()
     conn.close()
 
@@ -115,6 +115,14 @@ def db_get_catalog_items():
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+def db_get_catalog_item_by_id(item_id):
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, photo_id, title, description FROM catalog WHERE id = ?", (item_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
 
 def db_get_stats():
     conn = sqlite3.connect("tez_mebel.db")
@@ -168,7 +176,6 @@ class OrderState(StatesGroup):
     waiting_for_location = State()
     waiting_for_furniture = State()
     waiting_for_broadcast = State()
-    # Admin katalog qo'shish bosqichlari (rasm, nom, tavsif)
     waiting_for_cat_photo = State()
     waiting_for_cat_title = State()
     waiting_for_cat_desc = State()
@@ -422,8 +429,12 @@ async def catalog_handler(message: Message, state: FSMContext):
         return
     
     for item_id, photo_id, title, desc in items:
+        # Callback ichiga item_id ni biriktiramiz (masalan: order_cat_5)
         item_kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="📝 Shu modelga buyurtma berish" if lang=="uz" else "📝 Заказать эту модель", callback_data="start_order_from_catalog")]]
+            inline_keyboard=[[InlineKeyboardButton(
+                text="📝 Shu modelga buyurtma berish" if lang=="uz" else "📝 Заказать эту модель", 
+                callback_data=f"order_cat_{item_id}"
+            )]]
         )
         caption_text = f"🗂 *{title}*\n\n{desc}"
         if photo_id:
@@ -431,8 +442,16 @@ async def catalog_handler(message: Message, state: FSMContext):
         else:
             await message.answer(caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
 
-@dp.callback_query(F.data == "start_order_from_catalog")
+@dp.callback_query(F.data.startswith("order_cat_"))
 async def order_from_catalog(callback: CallbackQuery, state: FSMContext):
+    item_id = int(callback.data.split("_")[2])
+    catalog_item = db_get_catalog_item_by_id(item_id)
+    
+    if catalog_item:
+        _, photo_id, title, desc = catalog_item
+        # Tanlangan mebel nomi va rasmini state'ga saqlab qo'yamiz
+        await state.update_data(furniture=f"Katalogdan: {title}", catalog_photo=photo_id)
+    
     data = await state.get_data()
     lang = data.get("lang", "uz")
     telegram_name = callback.from_user.first_name or "Mijoz"
@@ -607,28 +626,38 @@ async def process_location(message: Message, state: FSMContext):
     loc_data = {"lat": message.location.latitude, "lon": message.location.longitude} if message.location else message.text
     await state.update_data(location=loc_data)
     data = await state.get_data()
-    lang = data.get("lang", "uz")
-
-    await message.answer(
-        TEXTS[lang]["ask_furniture"],
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_furniture_keyboard(lang)
-    )
-    await state.set_state(OrderState.waiting_for_furniture)
+    
+    # Agar buyurtma katalogdan tanlangan bo'lsa, mebel turini o'sha yerda saqlab yuboramiz
+    if "furniture" in data and data["furniture"].startswith("Katalogdan:"):
+        await finalize_order(message, state)
+    else:
+        lang = data.get("lang", "uz")
+        await message.answer(
+            TEXTS[lang]["ask_furniture"],
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_furniture_keyboard(lang)
+        )
+        await state.set_state(OrderState.waiting_for_furniture)
 
 @dp.message(OrderState.waiting_for_furniture, F.text)
 async def process_furniture(message: Message, state: FSMContext):
-    furniture_detail = message.text
+    await state.update_data(furniture=message.text)
+    await finalize_order(message, state)
+
+async def finalize_order(message: Message, state: FSMContext):
     user_data = await state.get_data()
     lang = user_data.get("lang", "uz")
     
     name = user_data.get("name")
     phone = user_data.get("phone")
     location = user_data.get("location")
+    furniture_detail = user_data.get("furniture", "Noma'lum")
+    catalog_photo = user_data.get("catalog_photo") # Katalog rasmi ID si
+    
     user_id = message.from_user.id
     username = message.from_user.username
 
-    db_save_order(user_id, name, phone, location, furniture_detail)
+    db_save_order(user_id, name, phone, location, furniture_detail, catalog_photo)
 
     await message.answer(
         TEXTS[lang]["order_done"],
@@ -636,7 +665,7 @@ async def process_furniture(message: Message, state: FSMContext):
     )
 
     admin_text = (
-        "📥 *Yangi buyurtma qabul qilindi!*\n\n"
+        "📥 *Katalogdan yangi buyurtma qabul qilindi!*\n\n"
         f"🌐 *Til:* {lang.upper()}\n"
         f"👤 *Ismi:* {name}\n"
         f"📞 *Telefon:* `{phone}`\n"
@@ -649,7 +678,12 @@ async def process_furniture(message: Message, state: FSMContext):
     )
 
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode=ParseMode.MARKDOWN, reply_markup=user_keyboard)
+        # Agar mijoz katalogdan rasm tanlagan bo'lsa, adminga o'sha rasmni biriktirib yuboramiz
+        if catalog_photo:
+            await bot.send_photo(chat_id=ADMIN_ID, photo=catalog_photo, caption=admin_text, parse_mode=ParseMode.MARKDOWN, reply_markup=user_keyboard)
+        else:
+            await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode=ParseMode.MARKDOWN, reply_markup=user_keyboard)
+
         if isinstance(location, dict):
             await bot.send_location(chat_id=ADMIN_ID, latitude=location["lat"], longitude=location["lon"])
         else:
@@ -709,8 +743,7 @@ async def ai_chat_handler(message: Message):
         logging.error(f"Adminga chat yuborishda xato: {e}")
 
 async def handle_web(request):
-    app_status = "Bot is running smoothly with Photo Catalog!"
-    return web.Response(text=app_status)
+    return web.Response(text="Bot is running smoothly with Catalog Order Photos!")
 
 async def start_web_server():
     app = web.Application()
@@ -722,11 +755,11 @@ async def start_web_server():
     await site.start()
 
 async def main():
-    print("Tez Mebel Premium AI Boti (Rasmli katalog bilan) ishga tushdi...")
+    print("Tez Mebel Premium AI Boti ishga tushdi...")
     await bot.delete_webhook(drop_pending_updates=True)
     await start_web_server()
     
-    while TYPE_CHECKING := True:
+    while True:
         try:
             await dp.start_polling(bot, drop_pending_updates=True)
         except (TelegramNetworkError, Exception) as e:
