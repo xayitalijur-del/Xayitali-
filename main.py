@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-import sqlite3
+import asyncpg
 import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -25,140 +25,151 @@ BOT_TOKEN = "8708329718:AAETLtIatPvg6DvfrP5Zf9EtqMLu4Czf3RA"
 GEMINI_API_KEY = "AQ.Ab8RN6JSIoDZP1aqzV0-XNoDbuviWI5fuXVQryMoZ9S0P04tFw"
 ADMIN_ID = 1927054009
 
-logging.basicConfig(level=logging.INFO)
+# Supabase PostgreSQL ulanish manzili
+DATABASE_URL = "postgresql://postgres:Saroy2645142x@db.uktemyykoirfrweqjhsm.supabase.co:5432/postgres"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- BAZA BILAN ISHLASH (SQLite) ---
-def init_db():
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            full_name TEXT,
-            username TEXT,
-            joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CATEGORIES = ["Oshxona", "Shkaf", "Doʻkon", "Apteka", "Aksessuar"]
+
+# --- POSTGRESQL BAZA BILAN ISHLASH (Supabase) ---
+async def init_db():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                full_name TEXT,
+                username TEXT,
+                joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                user_name TEXT,
+                question TEXT,
+                ai_answer TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                name TEXT,
+                phone TEXT,
+                location TEXT,
+                furniture TEXT,
+                photo_id TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalog (
+                id SERIAL PRIMARY KEY,
+                category TEXT,
+                photo_id TEXT,
+                title TEXT,
+                description TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    finally:
+        await conn.close()
+
+async def db_add_user(user_id, full_name, username):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO users (user_id, full_name, username) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING",
+            user_id, full_name, username
         )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS chats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            user_name TEXT,
-            question TEXT,
-            ai_answer TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    finally:
+        await conn.close()
+
+async def db_log_chat(user_id, user_name, question, ai_answer):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO chats (user_id, user_name, question, ai_answer) VALUES ($1, $2, $3, $4)",
+            user_id, user_name, question, ai_answer
         )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            name TEXT,
-            phone TEXT,
-            location TEXT,
-            furniture TEXT,
-            photo_id TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    finally:
+        await conn.close()
+
+async def db_save_order(user_id, name, phone, location, furniture, photo_id):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO orders (user_id, name, phone, location, furniture, photo_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            user_id, name, phone, str(location), furniture, photo_id
         )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS catalog (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            photo_id TEXT,
-            title TEXT,
-            description TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    finally:
+        await conn.close()
+
+async def db_add_catalog_item(category, photo_id, title, description):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO catalog (category, photo_id, title, description) VALUES ($1, $2, $3, $4)",
+            category, photo_id, title, description
         )
-    """)
-    conn.commit()
-    conn.close()
+    finally:
+        await conn.close()
 
-init_db()
+async def db_get_catalog_items_by_category(category):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        return await conn.fetch(
+            "SELECT id, photo_id, title, description FROM catalog WHERE category = $1 ORDER BY id DESC", category
+        )
+    finally:
+        await conn.close()
 
-def db_add_user(user_id, full_name, username):
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name, username) VALUES (?, ?, ?)", 
-                   (user_id, full_name, username))
-    conn.commit()
-    conn.close()
+async def db_get_catalog_item_by_id(item_id):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        return await conn.fetchrow(
+            "SELECT id, photo_id, title, description FROM catalog WHERE id = $1", item_id
+        )
+    finally:
+        await conn.close()
 
-def db_log_chat(user_id, user_name, question, ai_answer):
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO chats (user_id, user_name, question, ai_answer) VALUES (?, ?, ?, ?)",
-                   (user_id, user_name, question, ai_answer))
-    conn.commit()
-    conn.close()
+async def db_get_stats():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        u_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+        c_count = await conn.fetchval("SELECT COUNT(*) FROM chats")
+        o_count = await conn.fetchval("SELECT COUNT(*) FROM orders")
+        return u_count, c_count, o_count
+    finally:
+        await conn.close()
 
-def db_save_order(user_id, name, phone, location, furniture, photo_id):
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO orders (user_id, name, phone, location, furniture, photo_id) VALUES (?, ?, ?, ?, ?, ?)",
-                   (user_id, name, phone, str(location), furniture, photo_id))
-    conn.commit()
-    conn.close()
+async def db_get_all_users():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        return [row["user_id"] for row in rows]
+    finally:
+        await conn.close()
 
-def db_add_catalog_item(photo_id, title, description):
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO catalog (photo_id, title, description) VALUES (?, ?, ?)", (photo_id, title, description))
-    conn.commit()
-    conn.close()
+async def db_get_chat_logs():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        return await conn.fetch("SELECT user_name, question, ai_answer, timestamp FROM chats ORDER BY id DESC")
+    finally:
+        await conn.close()
 
-def db_get_catalog_items():
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, photo_id, title, description FROM catalog ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
-def db_get_catalog_item_by_id(item_id):
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, photo_id, title, description FROM catalog WHERE id = ?", (item_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-def db_get_stats():
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM chats")
-    chats_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM orders")
-    orders_count = cursor.fetchone()[0]
-    conn.close()
-    return users_count, chats_count, orders_count
-
-def db_get_all_users():
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    users = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return users
-
-def db_get_chat_logs():
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_name, question, ai_answer, timestamp FROM chats ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
-def db_get_orders():
-    conn = sqlite3.connect("tez_mebel.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, phone, location, furniture, timestamp FROM orders ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+async def db_get_orders():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        return await conn.fetch("SELECT name, phone, location, furniture, timestamp FROM orders ORDER BY id DESC")
+    finally:
+        await conn.close()
 
 # --- AI TIZIMI ---
 SYSTEM_PROMPT = (
@@ -176,6 +187,7 @@ class OrderState(StatesGroup):
     waiting_for_location = State()
     waiting_for_furniture = State()
     waiting_for_broadcast = State()
+    waiting_for_cat_category = State()
     waiting_for_cat_photo = State()
     waiting_for_cat_title = State()
     waiting_for_cat_desc = State()
@@ -195,12 +207,12 @@ TEXTS = {
         "ask_location": "Ajoyib! Endi usta kelishi uchun *lokatsiyangizni* yuboring:",
         "btn_location": "📍 Lokatsiyani yuborish",
         "ask_furniture": "Qanday turdagi mebel buyurtma qilmoqchisiz? Tanlang yoki yozib yuboring:",
-        "furnitures": ["Oshxona", "Shkaf", "Doʻkon", "Apteka", "Aksessuar"],
         "order_done": "Rahmat! Buyurtmangiz qabul qilindi. Tez orada mutaxassisimiz siz bilan bog'lanadi. 🛠️",
         "about_text": "✨ *Tez Mebel* — har qanday turdagi dizayn asosida sifatli va ishonchli mebellarni tayyorlab berish xizmati.\n\n🔹 Premium materiallar (MDF, Akril, LDSP)\n🔹 Tajribali ustalar va tezkor o'lcham olish\n🔹 Kafolatli sifat va hamyonbop narxlar",
-        "contact_text": "📞 *Biz bilan bog'lanish:*\n\nSavollar bo'yicha mutaxassisimizga to'g'ridan-to'g'ri murojaat qilishingiz mumkin.",
+        "contact_text": "📞 *Biz bilan bog'lanish:*\n\n📞 Tel: +998 (90) 123-45-67\n📍 Manzil: Toshkent shahri\n⏱ Ish vaqti: 09:00 - 19:00",
         "lang_changed": "Til muvaffaqiyatli o'zgartirildi! 🇺🇿",
-        "home_text": "Siz asosiy menyuga qaytdingiz. Kerakli bo'limni tanlang:"
+        "home_text": "Siz asosiy menyuga qaytdingiz. Kerakli bo'limni tanlang:",
+        "catalog_choose": "🗂 Kerakli mebel kategoriyasini tanlang:"
     },
     "ru": {
         "welcome": "Здравствуйте! Добро пожаловать в официальный премиум-бот *'Tez Mebel'*! 🛠️ ✨\n\nЗадавайте вопросы или используйте меню ниже:",
@@ -216,12 +228,12 @@ TEXTS = {
         "ask_location": "Отлично! Теперь отправьте вашу *локацию* для вызова мастера:",
         "btn_location": "📍 Отправить локацию",
         "ask_furniture": "Какую мебель вы хотите заказать? Выберите или напишите свой вариант:",
-        "furnitures": ["Кухня", "Шкаф", "Магазин", "Аптека", "Аксессуары"],
         "order_done": "Спасибо! Ваш заказ принят. Наш специалист свяжется с вами в ближайшее время. 🛠️",
         "about_text": "✨ *Tez Mebel* — изготовление качественной и надежной мебели на заказ.\n\n🔹 Премиальные материалы (МДФ, Акрил, ЛДСП)\n🔹 Опытные мастера и быстрый замер\n🔹 Гарантия качества и доступные цены",
-        "contact_text": "📞 *Контакты:*\n\nПо всем вопросам вы можете обратиться к нашему специалисту.",
+        "contact_text": "📞 *Контакты:*\n\n📞 Тел: +998 (90) 123-45-67\n📍 Адрес: г. Ташкент\n⏱ Режим работы: 09:00 - 19:00",
         "lang_changed": "Язык успешно изменен! 🇷🇺",
-        "home_text": "Вы вернулись в главное меню. Выберите нужный раздел:"
+        "home_text": "Вы вернулись в главное меню. Выберите нужный раздел:",
+        "catalog_choose": "🗂 Выберите категорию мебели:"
     }
 }
 
@@ -274,12 +286,11 @@ def get_location_keyboard(lang: str):
     )
 
 def get_furniture_keyboard(lang: str):
-    f = TEXTS[lang]["furnitures"]
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=f[0]), KeyboardButton(text=f[1])],
-            [KeyboardButton(text=f[2]), KeyboardButton(text=f[3])],
-            [KeyboardButton(text=f[4])],
+            [KeyboardButton(text=CATEGORIES[0]), KeyboardButton(text=CATEGORIES[1])],
+            [KeyboardButton(text=CATEGORIES[2]), KeyboardButton(text=CATEGORIES[3])],
+            [KeyboardButton(text=CATEGORIES[4])],
             [KeyboardButton(text=TEXTS[lang]["btn_home"])]
         ],
         resize_keyboard=True,
@@ -307,18 +318,22 @@ async def get_gemini_response(user_text: str) -> str:
     payload = {
         "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\nMijoz xabari: {user_text}"}]}]
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers, timeout=15) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                logging.error(f"Gemini API xatosi: {response.status}")
-                return "Kechirasiz, hozirda so'rovingizni qayta ishlashda vaqtincha xatolik yuz berdi. Iltimos, birozdan so'ng qayta yozing."
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=15) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                else:
+                    logging.error(f"Gemini API xatosi status kodi: {response.status}")
+                    return "Kechirasiz, hozirda so'rovingizni qayta ishlashda vaqtincha xatolik yuz berdi. Iltimos, birozdan so'ng qayta yozing."
+    except Exception as e:
+        logging.error(f"Gemini ulanish xatosi: {e}")
+        return "Tarmoqda xatolik yuz berdi. Iltimos, birozdan so'ng yana urinib ko'ring."
 
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     await state.clear()
     await message.answer(
         "Iltimos, tilni tanlang / Пожалуйста, выберите язык:",
@@ -341,7 +356,7 @@ async def admin_panel_handler(message: Message, state: FSMContext):
 async def admin_stats_handler(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    u_count, c_count, o_count = db_get_stats()
+    u_count, c_count, o_count = await db_get_stats()
     stats_text = (
         f"📊 *Botning umumiy statistikasi:*\n\n"
         f"👥 Jami foydalanuvchilar: `{u_count}` ta\n"
@@ -350,16 +365,43 @@ async def admin_stats_handler(message: Message):
     )
     await message.answer(stats_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_keyboard())
 
-# --- ADMIN RASMLI KATALOG QO'SHISH ---
+# --- ADMIN KATEGORIYALI KATALOG QO'SHISH ---
 @dp.message(F.text == "➕ Katalogga mebel qo'shish")
 async def admin_add_catalog_prompt(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
+    
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=CATEGORIES[0]), KeyboardButton(text=CATEGORIES[1])],
+            [KeyboardButton(text=CATEGORIES[2]), KeyboardButton(text=CATEGORIES[3])],
+            [KeyboardButton(text=CATEGORIES[4])],
+            [KeyboardButton(text="❌ Bekor qilish")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("📂 Mebel qaysi **kategoriyaga** tegishli ekanligini tanlang:", reply_markup=kb)
+    await state.set_state(OrderState.waiting_for_cat_category)
+
+@dp.message(OrderState.waiting_for_cat_category, F.text)
+async def process_cat_category(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if message.text == "❌ Bekor qilish":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=get_admin_keyboard())
+        return
+    
+    if message.text not in CATEGORIES:
+        await message.answer("⚠️ Iltimos, tugmalardan birini tanlang!")
+        return
+
+    await state.update_data(cat_category=message.text)
     cancel_kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
         resize_keyboard=True
     )
-    await message.answer("📸 Iltimos, mebelning **rasmini** yuboring:", reply_markup=cancel_kb)
+    await message.answer("📸 Endi mebelning **rasmini** yuboring:", reply_markup=cancel_kb)
     await state.set_state(OrderState.waiting_for_cat_photo)
 
 @dp.message(OrderState.waiting_for_cat_photo, F.photo)
@@ -407,49 +449,63 @@ async def process_cat_desc(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    category = data.get("cat_category")
     photo_id = data.get("cat_photo")
     title = data.get("cat_title")
     description = message.text
 
-    db_add_catalog_item(photo_id, title, description)
+    await db_add_catalog_item(category, photo_id, title, description)
     await state.clear()
     await message.answer("✅ Rasmli mebel katalogga muvaffaqiyatli qo'shildi! 🗂", reply_markup=get_admin_keyboard())
 
-# --- MIJOZ UCHUN RASMLI KATALOGNI KO'RSATISH ---
+# --- MIJOZ UCHIN KATEGORIYALI KATALOG ---
 @dp.message(F.text.in_(["🗂 Mebellar katalogi", "🗂 Каталог мебели"]))
 async def catalog_handler(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     
-    items = db_get_catalog_items()
+    inline_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"🍳 {CATEGORIES[0]}", callback_data="cat_Oshxona"), InlineKeyboardButton(text=f"🗄 {CATEGORIES[1]}", callback_data="cat_Shkaf")],
+            [InlineKeyboardButton(text=f"🏪 {CATEGORIES[2]}", callback_data="cat_Doʻkon"), InlineKeyboardButton(text=f"💊 {CATEGORIES[3]}", callback_data="cat_Apteka")],
+            [InlineKeyboardButton(text=f"🛋 {CATEGORIES[4]}", callback_data="cat_Aksessuar")]
+        ]
+    )
+    await message.answer(TEXTS[lang]["catalog_choose"], reply_markup=inline_kb)
+
+@dp.callback_query(F.data.startswith("cat_"))
+async def category_items_handler(callback: CallbackQuery):
+    category = callback.data.split("_")[1]
+    items = await db_get_catalog_items_by_category(category)
+    
     if not items:
-        text = "Hozircha katalogda mebellar mavjud emas. Tez orada qo'shiladi!" if lang == "uz" else "В каталоге пока нет мебели. Скоро появится!"
-        await message.answer(text)
+        await callback.message.answer(f"⚠️ '{category}' kategoriyasida hozircha mebellar mavjud emas.")
+        await callback.answer()
         return
     
-    for item_id, photo_id, title, desc in items:
-        # Callback ichiga item_id ni biriktiramiz (masalan: order_cat_5)
+    await callback.message.answer(f"📂 *{category}* bo'yicha mebellar:", parse_mode=ParseMode.MARKDOWN)
+    
+    for item in items:
+        item_id, photo_id, title, desc = item["id"], item["photo_id"], item["title"], item["description"]
         item_kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(
-                text="📝 Shu modelga buyurtma berish" if lang=="uz" else "📝 Заказать эту модель", 
-                callback_data=f"order_cat_{item_id}"
-            )]]
+            inline_keyboard=[[InlineKeyboardButton(text="📝 Shu modelga buyurtma berish", callback_data=f"order_cat_{item_id}")]]
         )
         caption_text = f"🗂 *{title}*\n\n{desc}"
         if photo_id:
-            await message.answer_photo(photo=photo_id, caption=caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
+            await callback.message.answer_photo(photo=photo_id, caption=caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
         else:
-            await message.answer(caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
+            await callback.message.answer(caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
+    
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("order_cat_"))
 async def order_from_catalog(callback: CallbackQuery, state: FSMContext):
     item_id = int(callback.data.split("_")[2])
-    catalog_item = db_get_catalog_item_by_id(item_id)
+    catalog_item = await db_get_catalog_item_by_id(item_id)
     
     if catalog_item:
-        _, photo_id, title, desc = catalog_item
-        # Tanlangan mebel nomi va rasmini state'ga saqlab qo'yamiz
+        photo_id, title = catalog_item["photo_id"], catalog_item["title"]
         await state.update_data(furniture=f"Katalogdan: {title}", catalog_photo=photo_id)
     
     data = await state.get_data()
@@ -468,14 +524,14 @@ async def order_from_catalog(callback: CallbackQuery, state: FSMContext):
 async def admin_download_chats_handler(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    logs = db_get_chat_logs()
+    logs = await db_get_chat_logs()
     if not logs:
         await message.answer("Yozishmalar mavjud emas!", reply_markup=get_admin_keyboard())
         return
     
     content = "=== MIJOZ VA AI YOZISHMALARI TARIXI ===\n\n"
-    for name, q, a, time in logs:
-        content += f"Vaqt: {time}\nMijoz: {name}\nSavol: {q}\nAI Javob: {a}\n" + "-"*40 + "\n"
+    for row in logs:
+        content += f"Vaqt: {row['timestamp']}\nMijoz: {row['user_name']}\nSavol: {row['question']}\nAI Javob: {row['ai_answer']}\n" + "-"*40 + "\n"
     
     file_bytes = content.encode("utf-8")
     doc = BufferedInputFile(file_bytes, filename="mijozlar_yozishmalari.txt")
@@ -485,14 +541,14 @@ async def admin_download_chats_handler(message: Message):
 async def admin_download_orders_handler(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    orders = db_get_orders()
+    orders = await db_get_orders()
     if not orders:
         await message.answer("Buyurtmalar mavjud emas!", reply_markup=get_admin_keyboard())
         return
     
-    content = "=== TAHVIL QILINGAN BUYURTMALAR HISTORIYASI ===\n\n"
-    for name, phone, loc, furn, time in orders:
-        content += f"Vaqt: {time}\nIsm: {name}\nTel: {phone}\nManzil: {loc}\nMebel: {furn}\n" + "="*30 + "\n"
+    content = "=== TAHVIL QILINGAN BUYURTMALAR TARIXI ===\n\n"
+    for row in orders:
+        content += f"Vaqt: {row['timestamp']}\nIsm: {row['name']}\nTel: {row['phone']}\nManzil: {row['location']}\nMebel: {row['furniture']}\n" + "="*30 + "\n"
         
     file_bytes = content.encode("utf-8")
     doc = BufferedInputFile(file_bytes, filename="buyurtmalar_tarixi.txt")
@@ -521,7 +577,7 @@ async def process_broadcast(message: Message, state: FSMContext):
 
     broadcast_text = message.text
     await state.clear()
-    users = db_get_all_users()
+    users = await db_get_all_users()
     
     success = 0
     fail = 0
@@ -544,7 +600,7 @@ async def process_broadcast(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["🌐 Tilni o'zgartirish", "🌐 Сменить язык"]))
 async def change_lang_handler(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     await message.answer(
         "Iltimos, yangi tilni tanlang / Пожалуйста, выберите новый язык:",
         reply_markup=get_lang_keyboard()
@@ -553,7 +609,7 @@ async def change_lang_handler(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["🏠 Bosh sahifa", "🏠 Главная страница"]))
 async def go_home(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     
     if message.from_user.id == ADMIN_ID:
         await state.clear()
@@ -582,7 +638,7 @@ async def set_language(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["📝 Buyurtma berish / O'lcham olish", "📝 Заказать / Вызов замерщика"]))
 async def start_order(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     telegram_name = message.from_user.first_name or "Mijoz"
@@ -627,7 +683,6 @@ async def process_location(message: Message, state: FSMContext):
     await state.update_data(location=loc_data)
     data = await state.get_data()
     
-    # Agar buyurtma katalogdan tanlangan bo'lsa, mebel turini o'sha yerda saqlab yuboramiz
     if "furniture" in data and data["furniture"].startswith("Katalogdan:"):
         await finalize_order(message, state)
     else:
@@ -652,12 +707,12 @@ async def finalize_order(message: Message, state: FSMContext):
     phone = user_data.get("phone")
     location = user_data.get("location")
     furniture_detail = user_data.get("furniture", "Noma'lum")
-    catalog_photo = user_data.get("catalog_photo") # Katalog rasmi ID si
+    catalog_photo = user_data.get("catalog_photo")
     
     user_id = message.from_user.id
     username = message.from_user.username
 
-    db_save_order(user_id, name, phone, location, furniture_detail, catalog_photo)
+    await db_save_order(user_id, name, phone, location, furniture_detail, catalog_photo)
 
     await message.answer(
         TEXTS[lang]["order_done"],
@@ -678,7 +733,6 @@ async def finalize_order(message: Message, state: FSMContext):
     )
 
     try:
-        # Agar mijoz katalogdan rasm tanlagan bo'lsa, adminga o'sha rasmni biriktirib yuboramiz
         if catalog_photo:
             await bot.send_photo(chat_id=ADMIN_ID, photo=catalog_photo, caption=admin_text, parse_mode=ParseMode.MARKDOWN, reply_markup=user_keyboard)
         else:
@@ -695,14 +749,14 @@ async def finalize_order(message: Message, state: FSMContext):
 
 @dp.message(F.text.in_(["ℹ️ Biz haqimizda", "ℹ️ О нас"]))
 async def about_handler(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     await message.answer(TEXTS[lang]["about_text"], parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard(lang))
 
 @dp.message(F.text.in_(["📞 Aloqa", "📞 Контакты"]))
 async def contact_handler(message: Message, state: FSMContext):
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     data = await state.get_data()
     lang = data.get("lang", "uz")
     await message.answer(TEXTS[lang]["contact_text"], parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard(lang))
@@ -712,7 +766,7 @@ async def ai_chat_handler(message: Message):
     if message.from_user.is_bot:
         return
 
-    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     user = message.from_user
@@ -724,7 +778,7 @@ async def ai_chat_handler(message: Message):
     ai_reply = await get_gemini_response(user_text)
     await message.answer(ai_reply)
 
-    db_log_chat(user_id, name, user_text, ai_reply)
+    await db_log_chat(user_id, name, user_text, ai_reply)
 
     user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
     admin_report = (
@@ -743,7 +797,7 @@ async def ai_chat_handler(message: Message):
         logging.error(f"Adminga chat yuborishda xato: {e}")
 
 async def handle_web(request):
-    return web.Response(text="Bot is running smoothly with Catalog Order Photos!")
+    return web.Response(text="Tez Mebel Premium Bot is running successfully with Supabase PostgreSQL!")
 
 async def start_web_server():
     app = web.Application()
@@ -755,7 +809,9 @@ async def start_web_server():
     await site.start()
 
 async def main():
-    print("Tez Mebel Premium AI Boti ishga tushdi...")
+    print("Bazada jadvallar tekshirilmoqda va yaratilmoqda...")
+    await init_db()
+    print("Tez Mebel Premium AI Boti Supabase PostgreSQL bilan to'liq ishga tushdi...")
     await bot.delete_webhook(drop_pending_updates=True)
     await start_web_server()
     
