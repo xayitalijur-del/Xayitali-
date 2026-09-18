@@ -8,12 +8,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.types import (
     Message, 
-    CallbackQuery,
     ReplyKeyboardMarkup, 
     KeyboardButton, 
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    BufferedInputFile
+    BufferedInputFile,
+    CallbackQuery
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -62,6 +62,16 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Katalog jadvali (photo_id ustuni qo'shildi)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS catalog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            photo_id TEXT,
+            title TEXT,
+            description TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -90,6 +100,21 @@ def db_save_order(user_id, name, phone, location, furniture):
                    (user_id, name, phone, str(location), furniture))
     conn.commit()
     conn.close()
+
+def db_add_catalog_item(photo_id, title, description):
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO catalog (photo_id, title, description) VALUES (?, ?, ?)", (photo_id, title, description))
+    conn.commit()
+    conn.close()
+
+def db_get_catalog_items():
+    conn = sqlite3.connect("tez_mebel.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, photo_id, title, description FROM catalog ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 def db_get_stats():
     conn = sqlite3.connect("tez_mebel.db")
@@ -143,11 +168,16 @@ class OrderState(StatesGroup):
     waiting_for_location = State()
     waiting_for_furniture = State()
     waiting_for_broadcast = State()
+    # Admin katalog qo'shish bosqichlari (rasm, nom, tavsif)
+    waiting_for_cat_photo = State()
+    waiting_for_cat_title = State()
+    waiting_for_cat_desc = State()
 
 TEXTS = {
     "uz": {
         "welcome": "Assalomu alaykum! *'Tez Mebel'* rasmiy premium botiga xush kelibsiz! 🛠️ ✨\n\nSavollaringizni yuboring yoki quyidagi menyudan foydalaning:",
         "btn_order": "📝 Buyurtma berish / O'lcham olish",
+        "btn_catalog": "🗂 Mebellar katalogi",
         "btn_about": "ℹ️ Biz haqimizda",
         "btn_contact": "📞 Aloqa",
         "btn_change_lang": "🌐 Tilni o'zgartirish",
@@ -168,6 +198,7 @@ TEXTS = {
     "ru": {
         "welcome": "Здравствуйте! Добро пожаловать в официальный премиум-бот *'Tez Mebel'*! 🛠️ ✨\n\nЗадавайте вопросы или используйте меню ниже:",
         "btn_order": "📝 Заказать / Вызов замерщика",
+        "btn_catalog": "🗂 Каталог мебели",
         "btn_about": "ℹ️ О нас",
         "btn_contact": "📞 Контакты",
         "btn_change_lang": "🌐 Сменить язык",
@@ -198,7 +229,7 @@ def get_main_keyboard(lang: str):
     t = TEXTS[lang]
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t["btn_order"])],
+            [KeyboardButton(text=t["btn_order"]), KeyboardButton(text=t["btn_catalog"])],
             [KeyboardButton(text=t["btn_about"]), KeyboardButton(text=t["btn_contact"])],
             [KeyboardButton(text=t["btn_change_lang"])]
         ],
@@ -249,13 +280,15 @@ def get_furniture_keyboard(lang: str):
     )
 
 def get_admin_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Batafsil Statistika", callback_data="admin_stats")],
-            [InlineKeyboardButton(text="📁 Yozishmalarni yuklab olish (.txt)", callback_data="admin_download_chats")],
-            [InlineKeyboardButton(text="📋 Buyurtmalar hisoboti (.txt)", callback_data="admin_download_orders")],
-            [InlineKeyboardButton(text="📢 Hammaga xabar yuborish", callback_data="admin_broadcast")]
-        ]
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="➕ Katalogga mebel qo'shish")],
+            [KeyboardButton(text="📁 Yozishmalarni yuklab olish"), KeyboardButton(text="📋 Buyurtmalar hisoboti")],
+            [KeyboardButton(text="📢 Hammaga xabar yuborish")],
+            [KeyboardButton(text="🏠 Bosh sahifa")]
+        ],
+        resize_keyboard=True
     )
 
 async def get_gemini_response(user_text: str) -> str:
@@ -297,71 +330,183 @@ async def admin_panel_handler(message: Message, state: FSMContext):
         reply_markup=get_admin_keyboard()
     )
 
-@dp.callback_query(F.data.startswith("admin_"))
-async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Siz admin emassiz!", show_alert=True)
+@dp.message(F.text == "📊 Statistika")
+async def admin_stats_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    u_count, c_count, o_count = db_get_stats()
+    stats_text = (
+        f"📊 *Botning umumiy statistikasi:*\n\n"
+        f"👥 Jami foydalanuvchilar: `{u_count}` ta\n"
+        f"💬 Jami AI yozishmalar: `{c_count}` ta\n"
+        f"📥 Jami buyurtmalar: `{o_count}` ta"
+    )
+    await message.answer(stats_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_keyboard())
+
+# --- ADMIN RASMLI KATALOG QO'SHISH ---
+@dp.message(F.text == "➕ Katalogga mebel qo'shish")
+async def admin_add_catalog_prompt(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    cancel_kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
+        resize_keyboard=True
+    )
+    await message.answer("📸 Iltimos, mebelning **rasmini** yuboring:", reply_markup=cancel_kb)
+    await state.set_state(OrderState.waiting_for_cat_photo)
+
+@dp.message(OrderState.waiting_for_cat_photo, F.photo)
+async def process_cat_photo(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    photo_id = message.photo[-1].file_id
+    await state.update_data(cat_photo=photo_id)
+    
+    cancel_kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
+        resize_keyboard=True
+    )
+    await message.answer("📝 Endi mebelning **nomini** kiriting (masalan: *Zamonaviy oshxona*):", reply_markup=cancel_kb)
+    await state.set_state(OrderState.waiting_for_cat_title)
+
+@dp.message(OrderState.waiting_for_cat_photo)
+async def process_cat_photo_invalid(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if message.text == "❌ Bekor qilish":
+        return
+    await message.answer("⚠️ Iltimos, matn emas, aynan **mebel rasmini** yuboring!")
+
+@dp.message(OrderState.waiting_for_cat_title, F.text)
+async def process_cat_title(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if message.text == "❌ Bekor qilish":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=get_admin_keyboard())
         return
 
-    action = callback.data
-    if action == "admin_stats":
-        u_count, c_count, o_count = db_get_stats()
-        stats_text = (
-            f"📊 *Botning umumiy statistikasi:*\n\n"
-            f"👥 Jami foydalanuvchilar: `{u_count}` ta\n"
-            f"💬 Jami AI yozishmalar: `{c_count}` ta\n"
-            f"📥 Jami buyurtmalar: `{o_count}` ta"
+    await state.update_data(cat_title=message.text)
+    await message.answer("📄 Endi mebelning **tavsifi va narxini** kiriting (masalan: *Material: MDF, Narxi: 2.5 mln so'm*):")
+    await state.set_state(OrderState.waiting_for_cat_desc)
+
+@dp.message(OrderState.waiting_for_cat_desc, F.text)
+async def process_cat_desc(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if message.text == "❌ Bekor qilish":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=get_admin_keyboard())
+        return
+
+    data = await state.get_data()
+    photo_id = data.get("cat_photo")
+    title = data.get("cat_title")
+    description = message.text
+
+    db_add_catalog_item(photo_id, title, description)
+    await state.clear()
+    await message.answer("✅ Rasmli mebel katalogga muvaffaqiyatli qo'shildi! 🗂", reply_markup=get_admin_keyboard())
+
+# --- MIJOZ UCHUN RASMLI KATALOGNI KO'RSATISH ---
+@dp.message(F.text.in_(["🗂 Mebellar katalogi", "🗂 Каталог мебели"]))
+async def catalog_handler(message: Message, state: FSMContext):
+    db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    data = await state.get_data()
+    lang = data.get("lang", "uz")
+    
+    items = db_get_catalog_items()
+    if not items:
+        text = "Hozircha katalogda mebellar mavjud emas. Tez orada qo'shiladi!" if lang == "uz" else "В каталоге пока нет мебели. Скоро появится!"
+        await message.answer(text)
+        return
+    
+    for item_id, photo_id, title, desc in items:
+        item_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📝 Shu modelga buyurtma berish" if lang=="uz" else "📝 Заказать эту модель", callback_data="start_order_from_catalog")]]
         )
-        await callback.message.answer(stats_text, parse_mode=ParseMode.MARKDOWN)
-        await callback.answer()
+        caption_text = f"🗂 *{title}*\n\n{desc}"
+        if photo_id:
+            await message.answer_photo(photo=photo_id, caption=caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
+        else:
+            await message.answer(caption_text, parse_mode=ParseMode.MARKDOWN, reply_markup=item_kb)
 
-    elif action == "admin_download_chats":
-        logs = db_get_chat_logs()
-        if not logs:
-            await callback.answer("Yozishmalar mavjud emas!", show_alert=True)
-            return
-        
-        content = "=== MIJOZ VA AI YOZISHMALARI TARIXI ===\n\n"
-        for name, q, a, time in logs:
-            content += f"Vaqt: {time}\nMijoz: {name}\nSavol: {q}\nAI Javob: {a}\n" + "-"*40 + "\n"
-        
-        file_bytes = content.encode("utf-8")
-        doc = BufferedInputFile(file_bytes, filename="mijozlar_yozishmalari.txt")
-        await callback.message.answer_document(document=doc, caption="📁 Barcha AI suhbatlari tarixi.")
-        await callback.answer()
+@dp.callback_query(F.data == "start_order_from_catalog")
+async def order_from_catalog(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lang = data.get("lang", "uz")
+    telegram_name = callback.from_user.first_name or "Mijoz"
+    
+    await callback.message.answer(
+        TEXTS[lang]["ask_name"],
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_name_keyboard(telegram_name, lang)
+    )
+    await state.set_state(OrderState.waiting_for_name)
+    await callback.answer()
 
-    elif action == "admin_download_orders":
-        orders = db_get_orders()
-        if not orders:
-            await callback.answer("Buyurtmalar mavjud emas!", show_alert=True)
-            return
-        
-        content = "=== TAHVIL QILINGAN BUYURTMALAR HISTORIYASI ===\n\n"
-        for name, phone, loc, furn, time in orders:
-            content += f"Vaqt: {time}\nIsm: {name}\nTel: {phone}\nManzil: {loc}\nMebel: {furn}\n" + "="*30 + "\n"
-            
-        file_bytes = content.encode("utf-8")
-        doc = BufferedInputFile(file_bytes, filename="buyurtmalar_tarixi.txt")
-        await callback.message.answer_document(document=doc, caption="📋 Barcha buyurtmalar ro'yxati.")
-        await callback.answer()
+@dp.message(F.text == "📁 Yozishmalarni yuklab olish")
+async def admin_download_chats_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    logs = db_get_chat_logs()
+    if not logs:
+        await message.answer("Yozishmalar mavjud emas!", reply_markup=get_admin_keyboard())
+        return
+    
+    content = "=== MIJOZ VA AI YOZISHMALARI TARIXI ===\n\n"
+    for name, q, a, time in logs:
+        content += f"Vaqt: {time}\nMijoz: {name}\nSavol: {q}\nAI Javob: {a}\n" + "-"*40 + "\n"
+    
+    file_bytes = content.encode("utf-8")
+    doc = BufferedInputFile(file_bytes, filename="mijozlar_yozishmalari.txt")
+    await message.answer_document(document=doc, caption="📁 Barcha AI suhbatlari tarixi.", reply_markup=get_admin_keyboard())
 
-    elif action == "admin_broadcast":
-        await callback.message.answer("📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni kiriting:")
-        await state.set_state(OrderState.waiting_for_broadcast)
-        await callback.answer()
+@dp.message(F.text == "📋 Buyurtmalar hisoboti")
+async def admin_download_orders_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    orders = db_get_orders()
+    if not orders:
+        await message.answer("Buyurtmalar mavjud emas!", reply_markup=get_admin_keyboard())
+        return
+    
+    content = "=== TAHVIL QILINGAN BUYURTMALAR HISTORIYASI ===\n\n"
+    for name, phone, loc, furn, time in orders:
+        content += f"Vaqt: {time}\nIsm: {name}\nTel: {phone}\nManzil: {loc}\nMebel: {furn}\n" + "="*30 + "\n"
+        
+    file_bytes = content.encode("utf-8")
+    doc = BufferedInputFile(file_bytes, filename="buyurtmalar_tarixi.txt")
+    await message.answer_document(document=doc, caption="📋 Barcha buyurtmalar ro'yxati.", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "📢 Hammaga xabar yuborish")
+async def admin_broadcast_prompt(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    cancel_kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
+        resize_keyboard=True
+    )
+    await message.answer("📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni kiriting:", reply_markup=cancel_kb)
+    await state.set_state(OrderState.waiting_for_broadcast)
 
 @dp.message(OrderState.waiting_for_broadcast, F.text)
 async def process_broadcast(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     
+    if message.text == "❌ Bekor qilish":
+        await state.clear()
+        await message.answer("❌ Xabar tarqatish bekor qilindi.", reply_markup=get_admin_keyboard())
+        return
+
     broadcast_text = message.text
     await state.clear()
     users = db_get_all_users()
     
     success = 0
     fail = 0
-    status_msg = await message.answer("⏳ Xabarlar tarqatilmoqda...")
+    status_msg = await message.answer("⏳ Xabarlar tarqatilmoqda...", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     for uid in users:
         try:
@@ -376,6 +521,7 @@ async def process_broadcast(message: Message, state: FSMContext):
         f"Muvaffaqiyatli: {success} ta\n"
         f"Xatolik (bloklaganlar): {fail} ta"
     )
+    await message.answer("🛠 *Admin Boshqaruv Markazi*\n\nKerakli bo'limni tanlang:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_keyboard())
 
 @dp.message(F.text.in_(["🌐 Tilni o'zgartirish", "🌐 Сменить язык"]))
 async def change_lang_handler(message: Message, state: FSMContext):
@@ -389,6 +535,12 @@ async def change_lang_handler(message: Message, state: FSMContext):
 @dp.message(F.text.in_(["🏠 Bosh sahifa", "🏠 Главная страница"]))
 async def go_home(message: Message, state: FSMContext):
     db_add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    
+    if message.from_user.id == ADMIN_ID:
+        await state.clear()
+        await message.answer("🛠 *Admin Boshqaruv Markazi*", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_keyboard())
+        return
+
     data = await state.get_data()
     lang = data.get("lang", "uz")
     await state.clear()
@@ -476,7 +628,6 @@ async def process_furniture(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username
 
-    # Bazaga buyurtmani saqlash
     db_save_order(user_id, name, phone, location, furniture_detail)
 
     await message.answer(
@@ -539,7 +690,6 @@ async def ai_chat_handler(message: Message):
     ai_reply = await get_gemini_response(user_text)
     await message.answer(ai_reply)
 
-    # Bazaga yozishmani saqlash
     db_log_chat(user_id, name, user_text, ai_reply)
 
     user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user_id}"
@@ -559,7 +709,8 @@ async def ai_chat_handler(message: Message):
         logging.error(f"Adminga chat yuborishda xato: {e}")
 
 async def handle_web(request):
-    return web.Response(text="Bot is running smoothly!")
+    app_status = "Bot is running smoothly with Photo Catalog!"
+    return web.Response(text=app_status)
 
 async def start_web_server():
     app = web.Application()
@@ -571,11 +722,11 @@ async def start_web_server():
     await site.start()
 
 async def main():
-    print("Tez Mebel Premium AI Boti (SQLite bazasi bilan) ishga tushdi...")
+    print("Tez Mebel Premium AI Boti (Rasmli katalog bilan) ishga tushdi...")
     await bot.delete_webhook(drop_pending_updates=True)
     await start_web_server()
     
-    while True:
+    while TYPE_CHECKING := True:
         try:
             await dp.start_polling(bot, drop_pending_updates=True)
         except (TelegramNetworkError, Exception) as e:
